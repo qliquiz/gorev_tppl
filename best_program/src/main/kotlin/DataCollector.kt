@@ -14,6 +14,7 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+/** Conf */
 const val HOST = "95.163.237.76"
 const val PORT_1 = 5123
 const val PORT_2 = 5124
@@ -29,28 +30,39 @@ val timeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
 
 fun main() = runBlocking {
-    val file = File(OUTPUT_FILE)
-    println("Сервер: $HOST")
-    println("Файл: ${file.absolutePath}")
+    val stopSignal = async(Dispatchers.IO) {
+        readlnOrNull()
+        Unit
+    }
+
+    runApplication(
+        outputFile = File(OUTPUT_FILE), stopSignal = stopSignal
+    )
+}
+
+suspend fun runApplication(
+    outputFile: File, stopSignal: Deferred<Unit>, host: String = HOST, port1: Int = PORT_1, port2: Int = PORT_2
+) = coroutineScope {
+    println("Сервер: $host")
+    println("Порты: $port1, $port2")
+    println("Файл: ${outputFile.absolutePath}")
     println("Нажмите Enter для корректной остановки...")
 
     val dataChannel = Channel<String>(capacity = 10000)
 
     val writerJob = launch(Dispatchers.IO) {
-        fileWriter(dataChannel, file)
+        fileWriter(dataChannel, outputFile)
     }
 
     val client1Job = launch(Dispatchers.IO) {
-        runClient(PORT_1, 15, dataChannel) { buf -> parsePort5123(buf) }
+        runClient(port1, 15, dataChannel, { buf -> parsePort5123(buf) }, host)
     }
 
     val client2Job = launch(Dispatchers.IO) {
-        runClient(PORT_2, 21, dataChannel) { buf -> parsePort5124(buf) }
+        runClient(port2, 21, dataChannel, { buf -> parsePort5124(buf) }, host)
     }
 
-    withContext(Dispatchers.IO) {
-        readlnOrNull()
-    }
+    stopSignal.await()
 
     println("\nЗавершение работы...")
     isRunning.set(false)
@@ -61,11 +73,11 @@ fun main() = runBlocking {
     writerJob.join()
 
     println("Итого записано строк: ${linesWritten.get()}")
-    println("Данные лежат в: ${file.name}")
+    println("Данные лежат в: ${outputFile.name}")
 }
 
 suspend fun runClient(
-    port: Int, packetSize: Int, channel: Channel<String>, parser: (ByteArray) -> String
+    port: Int, packetSize: Int, channel: Channel<String>, parser: (ByteArray) -> String, host: String = HOST
 ) {
     val buffer = ByteArray(packetSize)
     val greetingBuffer = ByteArray(7)
@@ -75,7 +87,7 @@ suspend fun runClient(
 
     while (isRunning.get()) {
         try {
-            Socket(HOST, port).use { socket ->
+            Socket(host, port).use { socket ->
                 socket.soTimeout = 10000
                 val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
                 val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
@@ -87,7 +99,7 @@ suspend fun runClient(
 
                 try {
                     input.readFully(greetingBuffer)
-                    println("Порт $port: Соединение стабильно. Сбор данных...")
+                    println("Порт $port: Соединение стабильно.")
                 } catch (_: Exception) {
                     println("Порт $port: Сбой авторизации (не пришел granted). Повтор...")
                     return@use
@@ -121,7 +133,6 @@ suspend fun fileWriter(channel: Channel<String>, file: File) {
             for (line in channel) {
                 writer.println(line)
                 val count = linesWritten.incrementAndGet()
-
                 if (count % 100 == 0L) print("\rВсего собрано строк: $count")
             }
         }
@@ -132,7 +143,9 @@ suspend fun fileWriter(channel: Channel<String>, file: File) {
 
 fun verifyChecksum(data: ByteArray): Boolean {
     var sum = 0
-    for (i in 0 until data.size - 1) sum += (data[i].toInt() and 0xFF)
+    for (i in 0 until data.size - 1) {
+        sum += (data[i].toInt() and 0xFF)
+    }
     return (sum % 256).toByte() == data.last()
 }
 
